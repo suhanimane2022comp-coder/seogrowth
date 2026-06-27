@@ -32,23 +32,22 @@ Generate keywords for each category. Return ONLY valid JSON:
 }}
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-        max_tokens=1500,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=1500,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         keywords = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[keyword_agent] Groq call/parse failed, using fallback: {e}")
         services = business_analysis.get('services', ['service'])
         s = services[0] if services else 'service'
         location = state.get('target_location', 'city')

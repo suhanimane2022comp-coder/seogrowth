@@ -35,23 +35,22 @@ Return ONLY valid JSON array:
 ]
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=1000,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=1000,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         return json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[content_agent] generate_metadata Groq call/parse failed, using fallback: {e}")
         return [
             {"page": "Home Page", "title": f"{state.get('business_name')} | Professional Services", "description": f"Expert services by {state.get('business_name')}. Serving {state.get('target_location')}. Contact us today!"},
             {"page": "About Page", "title": f"About {state.get('business_name')} | Our Story", "description": f"Learn about {state.get('business_name')} and our commitment to excellence."},
@@ -84,23 +83,22 @@ Return ONLY valid JSON array:
 ]
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=2000,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=2000,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         return json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[content_agent] generate_faqs Groq call/parse failed, using fallback: {e}")
         return [
             {"question": "What services do you offer?", "answer": f"{state.get('business_name')} offers a range of professional services tailored to your needs."},
             {"question": "Where are you located?", "answer": f"We proudly serve clients in {state.get('target_location')} and surrounding areas."},
@@ -131,23 +129,22 @@ Return ONLY valid JSON array:
 ]
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
-        max_tokens=1500,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            max_tokens=1500,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         return json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[content_agent] generate_blog_ideas Groq call/parse failed, using fallback: {e}")
         return [
             {"title": "10 Tips for Better Results", "outline": "A comprehensive guide helping your audience achieve better outcomes.", "target_keyword": "tips guide"},
             {"title": "Why Choose Professional Services", "outline": "Explains the value of professional expertise.", "target_keyword": "professional services"},

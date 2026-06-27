@@ -108,23 +108,22 @@ Identify content gaps and return ONLY valid JSON:
 }}
 """
 
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-        max_tokens=1000,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=1000,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         content_gaps = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[content_gap_agent] Groq call/parse failed, using fallback: {e}")
         content_gaps = {
             "missing_pages": ["Pricing Page", "FAQ Page", "Case Studies", "Testimonials", "Contact Page"],
             "missing_topics": ["How we work", "Our process", "Industry insights", "Success stories", "Team page"],

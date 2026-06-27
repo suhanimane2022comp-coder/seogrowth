@@ -30,24 +30,23 @@ Return ONLY valid JSON with this exact structure:
   "business_type": "B2B or B2C or both"
 }}
 """
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=1000,
-    )
-
-    raw = response.choices[0].message.content.strip()
-    # Clean potential markdown fences
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Clean potential markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
         business_analysis = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"[business_agent] Groq call/parse failed, using fallback: {e}")
         business_analysis = {
             "industry": "General Business",
             "target_audience": [state.get('target_audience', 'General')],
