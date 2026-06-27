@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "http://localhost:8000"
     DATABASE_URL: str = "sqlite:///seo_agent.db"
     JWT_ALGORITHM: str = "HS256"
+    PAGESPEED_API_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    SCRAPER_API_KEY: str = ""
 
     class Config:
         env_file = ".env"
