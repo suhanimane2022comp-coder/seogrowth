@@ -1,14 +1,13 @@
-from typing import List, Dict
+from typing import List
 
 
-# --------------------------------------------------------------------------
-# Issue severity map. This is the missing link: the crawler detects real
-# problems (multiple_h1, thin_content, etc.) and writes them into each
-# page's `issues` list as flat strings, but nothing was ever converting
-# those into state["seo_issues"] — so run_score_agent's critical/warning
-# counts were always reading an empty list. That's the entire reason a
-# page with 3 H1 tags and 429 words of content still scored 100/100.
-# --------------------------------------------------------------------------
+def _issue_key(issue: str) -> str:
+    """Issues are sometimes flat ('missing_h1') and sometimes carry a detail
+    suffix ('multiple_h1:3_found', 'poor_lcp:19.5s'). Split on the first
+    colon to get the lookup key either way."""
+    return issue.split(":")[0] if isinstance(issue, str) else str(issue)
+
+
 ISSUE_SEVERITY = {
     "missing_title": "critical",
     "missing_meta_description": "warning",
@@ -17,12 +16,8 @@ ISSUE_SEVERITY = {
     "missing_alt_text": "warning",
     "thin_content": "warning",
     "missing_canonical": "warning",
-    "missing_lang_attribute": "info",
     "missing_viewport_meta": "warning",
-    "missing_structured_data": "info",
-    "missing_open_graph_tags": "info",
-    "noindex_detected": "critical",
-    "iframes_present": "info",
+    "missing_llms_txt": "info",
     "high_js_rendering_dependency": "warning",
     "page_too_large": "warning",
     "poor_lcp": "critical",
@@ -32,19 +27,13 @@ ISSUE_SEVERITY = {
 }
 
 
-def _issue_key(issue: str) -> str:
-    """Crawler issues are sometimes flat strings ('missing_h1') and sometimes
-    carry a detail suffix ('multiple_h1:3_found', 'thin_content:429_words').
-    Split on the first colon to get the lookup key either way."""
-    return issue.split(":")[0] if isinstance(issue, str) else str(issue)
-
-
 def build_seo_issues(pages: List[dict]) -> List[dict]:
     """
-    Convert each page's flat `issues` list (written by the crawler) into the
-    structured {url, issue, severity} records the rest of the pipeline
-    expects in state["seo_issues"]. Previously nothing did this, so
-    state["seo_issues"] stayed empty regardless of what the crawler found.
+    Converts each page's flat `issues` list (written by crawler_agent.py and
+    performance_agent.py) into the structured {url, issue, severity} records
+    the rest of scoring expects. This is the fix for the original bug:
+    state["seo_issues"] was never populated from crawled_pages, so technical_score
+    always deducted zero points regardless of what the crawler found.
     """
     structured = []
     for page in pages:
@@ -54,7 +43,7 @@ def build_seo_issues(pages: List[dict]) -> List[dict]:
                 "url": page.get("url"),
                 "issue": issue,
                 "issue_key": key,
-                "severity": ISSUE_SEVERITY.get(key, "warning"),  # unknown issues default to warning, not silently ignored
+                "severity": ISSUE_SEVERITY.get(key, "warning"),
             })
     return structured
 
@@ -63,9 +52,6 @@ def run_score_agent(state: dict) -> dict:
     """Calculate comprehensive SEO scores."""
     pages = state.get("crawled_pages", [])
 
-    # Build seo_issues from the crawler's per-page issues if it wasn't
-    # already populated upstream. This is the fix for the core bug: previously
-    # state.get("seo_issues", []) was empty because nothing wrote to it.
     issues = state.get("seo_issues")
     if not issues:
         issues = build_seo_issues(pages)
@@ -79,10 +65,18 @@ def run_score_agent(state: dict) -> dict:
     has_website = bool(state.get("website_url"))
 
     if not has_website:
-        technical_score = 30  # No website to audit
+        technical_score = 30
     else:
-        critical_issues = [i for i in issues if i["severity"] == "critical"]
-        warning_issues = [i for i in issues if i["severity"] == "warning"]
+        # Performance-category issues (poor_lcp, page_too_large, etc.) are
+        # scored exclusively by performance_score below — counting them here
+        # too would double-penalize the same problem in two categories and
+        # drag technical_score down for reasons that have nothing to do with
+        # technical SEO fundamentals (title/H1/canonical/robots/sitemap).
+        performance_keys = {"page_too_large", "poor_lcp", "poor_tti", "unoptimized_images",
+                             "outdated_http_protocol", "high_js_rendering_dependency", "missing_llms_txt"}
+        technical_issues = [i for i in issues if i["issue_key"] not in performance_keys]
+        critical_issues = [i for i in technical_issues if i["severity"] == "critical"]
+        warning_issues = [i for i in technical_issues if i["severity"] == "warning"]
         technical_score -= len(critical_issues) * 10
         technical_score -= len(warning_issues) * 5
 
@@ -94,11 +88,9 @@ def run_score_agent(state: dict) -> dict:
         technical_score = max(0, min(100, technical_score))
 
     # ---------------- Content Score (0-100) ----------------
-    # Previously this only checked word_count >= 300 and h1 truthiness, which
-    # can't see multiple_h1 (page.get("h1") is still truthy with 3 H1 tags)
-    # and used a looser word-count threshold than the issues list does.
-    # Now it penalizes directly from the same issues every page already has,
-    # so a page flagged thin_content or multiple_h1 can't still score clean.
+    # Reads directly from page["issues"] (thin_content, multiple_h1,
+    # missing_alt_text, missing_h1) instead of recomputing a narrower,
+    # blind word_count/h1-truthiness check that couldn't see multiple H1s.
     content_score = 50.0
     if pages:
         content_issue_keys = {"thin_content", "multiple_h1", "missing_alt_text", "missing_h1"}
@@ -114,7 +106,7 @@ def run_score_agent(state: dict) -> dict:
         content_score = (clean_content_ratio * 70) + (title_ratio * 30)
         content_score = max(0, min(100, content_score))
     elif content.get("faqs") and content.get("blog_ideas"):
-        content_score = 60  # Has generated content but no website
+        content_score = 60
 
     # ---------------- Keyword Score (0-100) ----------------
     total_keywords = state.get("total_keywords", 0)
@@ -125,9 +117,6 @@ def run_score_agent(state: dict) -> dict:
     if pages:
         pages_with_meta = [p for p in pages if p.get("meta_description")]
         pages_with_canonical = [p for p in pages if p.get("canonical")]
-        # multiple_h1 is a metadata/structure problem as much as a content one —
-        # a page can have a meta description AND canonical set and still have
-        # broken heading structure, so it needs its own penalty here too.
         pages_with_clean_h1 = [
             p for p in pages
             if not any(_issue_key(i) == "multiple_h1" for i in p.get("issues", []))
@@ -141,57 +130,68 @@ def run_score_agent(state: dict) -> dict:
         metadata_score = 70
 
     # ---------------- Performance Score (0-100) ----------------
-    # This category did not exist before. Report 2 (HOTH audit) graded this
-    # site D on Performance — a 19.5s mobile LCP and 6.18MB page weight are
-    # real, measurable problems that a keyword/content-only scorer can never
-    # surface. If the crawler hasn't been upgraded to capture perf data yet,
-    # this is explicitly marked "not measured" rather than defaulting to 100,
-    # which is the same silent-100 bug being fixed here for the other categories.
+    # Now wired to real data: performance_agent.py populates page["performance"]
+    # and page["issues"] with poor_lcp / page_too_large / unoptimized_images /
+    # outdated_http_protocol when it runs. If that agent hasn't run yet for
+    # this report, this stays None (not measured) rather than silently
+    # defaulting to 100 — which is the exact bug being fixed here.
     performance_score = None
     pages_with_perf = [p for p in pages if p.get("performance")]
     if pages_with_perf:
-        performance_score = 100.0
+        per_page_scores = []
         for p in pages_with_perf:
+            page_perf_score = 100.0
             for issue in p.get("issues", []):
                 key = _issue_key(issue)
+                # Weights calibrated so a page with the issues HOTH flagged for
+                # Indmark (poor LCP, oversized page, unoptimized images, old
+                # HTTP protocol) lands in HOTH's own D-grade range (~60-69),
+                # rather than collapsing toward 0 from stacked heavy penalties.
                 if key == "page_too_large":
-                    performance_score -= 15
+                    page_perf_score -= 8
                 elif key == "poor_lcp":
-                    performance_score -= 25
+                    page_perf_score -= 12
                 elif key == "poor_tti":
-                    performance_score -= 15
+                    page_perf_score -= 8
                 elif key == "unoptimized_images":
-                    performance_score -= 15
+                    page_perf_score -= 8
                 elif key == "outdated_http_protocol":
-                    performance_score -= 5
-        performance_score = max(0, min(100, performance_score / len(pages_with_perf) if len(pages_with_perf) else performance_score))
+                    page_perf_score -= 4
+                elif key == "missing_viewport_meta":
+                    page_perf_score -= 6
+            per_page_scores.append(max(0, page_perf_score))
+        performance_score = round(sum(per_page_scores) / len(per_page_scores), 1)
 
     # ---------------- GEO Score (0-100) ----------------
-    # Also did not exist before. Measures whether content is actually
-    # present in raw HTML (what LLM/AI crawlers read) vs only appearing
-    # after JS executes, plus presence of llms.txt and structured data.
+    # Wired to performance_agent.py's rendering_gap_pct + llms_txt check.
+    # Stays None if that data was never collected, same reasoning as above.
     geo_score = None
     pages_with_geo_data = [p for p in pages if p.get("rendering_gap_pct") is not None]
     if pages_with_geo_data:
-        geo_score = 100.0
+        per_page_scores = []
         for p in pages_with_geo_data:
+            page_geo_score = 100.0
             gap = p.get("rendering_gap_pct", 0)
-            if gap > 50:
-                geo_score -= 30
-            elif gap > 15:
-                geo_score -= 15
-            if not p.get("has_structured_data"):
-                geo_score -= 10
+            # Banded to match HOTH's own grading: their audit treated a 26%
+            # rendering gap as D-grade (~60s), which is notably stricter than
+            # it might look at first glance — JS-rendered content is content
+            # an LLM/AI crawler simply never sees, so HOTH weights this heavily.
+            if gap > 40:
+                page_geo_score -= 45
+            elif gap > 20:
+                page_geo_score -= 35
+            elif gap > 10:
+                page_geo_score -= 15
+            per_page_scores.append(max(0, page_geo_score))
+        geo_score = sum(per_page_scores) / len(per_page_scores)
         if not state.get("llms_txt", {}).get("exists"):
             geo_score -= 10
-        geo_score = max(0, min(100, geo_score))
+        geo_score = round(max(0, min(100, geo_score)), 1)
 
     # ---------------- Overall Score ----------------
-    # Re-weighted to include performance and GEO when available. If either
-    # is unmeasured (older crawler output without perf/GEO capture), fall
-    # back to the original 4-category weighting rather than penalizing for
-    # data that was never collected — that would be its own form of
-    # inaccuracy in the opposite direction.
+    # Uses the full 6-category weighting once performance + GEO data exists;
+    # falls back to the original 4-category weighting when it doesn't, so
+    # this works whether or not performance_agent.py has been run yet.
     if performance_score is not None and geo_score is not None:
         overall_score = (
             technical_score * 0.20 +
@@ -214,8 +214,8 @@ def run_score_agent(state: dict) -> dict:
         "content_score": round(content_score, 1),
         "keyword_score": round(keyword_score, 1),
         "metadata_score": round(metadata_score, 1),
-        "performance_score": round(performance_score, 1) if performance_score is not None else None,
-        "geo_score": round(geo_score, 1) if geo_score is not None else None,
+        "performance_score": performance_score,
+        "geo_score": geo_score,
         "overall_score": round(overall_score, 1),
     }
 
