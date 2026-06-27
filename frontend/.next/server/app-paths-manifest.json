@@ -1,0 +1,8 @@
+{
+  "/reports/page": "app/reports/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/reports/[id]/page": "app/reports/[id]/page.js",
+  "/profile/setup/page": "app/profile/setup/page.js",
+  "/prompts/page": "app/prompts/page.js",
+  "/analyze/page": "app/analyze/page.js"
+}
