@@ -3,15 +3,15 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
 from typing import List, Optional
 import time
-from playwright.sync_api import sync_playwright
+import asyncio
+import concurrent.futures
+from playwright.async_api import async_playwright
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 SEOGrowthBot/1.0"
 }
 
-# Common paths worth trying directly even if they aren't linked from the
-# homepage in a way our crawler can detect (e.g. unusual nav structures).
 COMMON_PATHS = [
     "/contact", "/contact-us", "/about", "/about-us", "/services",
     "/pricing", "/faq", "/blog", "/privacy-policy", "/terms",
@@ -19,35 +19,23 @@ COMMON_PATHS = [
 
 
 def normalize_domain(netloc: str) -> str:
-    """Treat www.example.com and example.com as the same site."""
     return netloc.lower().lstrip("www.") if netloc.lower().startswith("www.") else netloc.lower()
 
 
 def normalize_url(url: str) -> str:
-    """Strip fragments (#section) and trailing slashes, and normalize the
-    www/non-www domain, so we don't treat the same page as multiple pages."""
     parsed = urlparse(url)
     path = parsed.path.rstrip("/") or "/"
     netloc = normalize_domain(parsed.netloc)
     return urlunparse((parsed.scheme, netloc, path, parsed.params, parsed.query, ""))
 
 
-def fetch_page(url: str, browser, timeout: int = 20000):
-    """Fetch a page using a real headless browser so JavaScript-rendered
-    content (React/Next/Vue sites, dynamically injected H1s, nav menus, etc.)
-    is visible — the same HTML a real visitor or Google would see, not just
-    the initial server response.
-
-    Returns (soup, final_url) or (None, None) on failure.
-    """
+async def fetch_page_async(url: str, browser, timeout: int = 20000):
     page = None
     try:
-        page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(url, wait_until="networkidle", timeout=timeout)
-        # Give any late client-side rendering (lazy components, delayed
-        # fetches) a brief moment to settle, beyond just network-idle.
-        page.wait_for_timeout(800)
-        html = page.content()
+        page = await browser.new_page(user_agent=HEADERS["User-Agent"])
+        await page.goto(url, wait_until="networkidle", timeout=timeout)
+        await page.wait_for_timeout(800)
+        html = await page.content()
         final_url = page.url
         return BeautifulSoup(html, "lxml"), final_url
     except Exception as e:
@@ -55,11 +43,10 @@ def fetch_page(url: str, browser, timeout: int = 20000):
         return None, None
     finally:
         if page:
-            page.close()
+            await page.close()
 
 
 def check_robots_txt(base_url: str) -> dict:
-    """robots.txt is a plain text file — no JS rendering needed."""
     robots_url = urljoin(base_url, "/robots.txt")
     try:
         r = requests.get(robots_url, headers=HEADERS, timeout=5)
@@ -70,7 +57,6 @@ def check_robots_txt(base_url: str) -> dict:
 
 
 def check_sitemap(base_url: str) -> dict:
-    """sitemap.xml is a plain text/XML file — no JS rendering needed."""
     for path in ("/sitemap.xml", "/sitemap_index.xml"):
         sitemap_url = urljoin(base_url, path)
         try:
@@ -153,13 +139,11 @@ def extract_page_data(url: str, soup: BeautifulSoup) -> dict:
     }
 
 
-def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
         try:
-            # Resolve the homepage first so we know the *actual* final domain
-            # (after any http->https or non-www->www redirect) before comparing links.
-            soup, resolved_url = fetch_page(base_url, browser)
+            soup, resolved_url = await fetch_page_async(base_url, browser)
             if not soup:
                 return []
 
@@ -179,7 +163,7 @@ def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
                     page_soup, final_url = soup, resolved_url
                     first = False
                 else:
-                    page_soup, final_url = fetch_page(url, browser)
+                    page_soup, final_url = await fetch_page_async(url, browser)
                     if not page_soup:
                         continue
                     norm = normalize_url(final_url)
@@ -193,12 +177,10 @@ def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
                 for link in page_data.get("internal_links", []):
                     if link not in visited and normalize_domain(urlparse(link).netloc) == base_domain:
                         to_visit.append(link)
-                        visited.add(link)  # mark queued to avoid duplicate enqueues
+                        visited.add(link)
 
-                time.sleep(0.3)  # be polite
+                await asyncio.sleep(0.3)
 
-            # If crawling only turned up the homepage, proactively probe a
-            # handful of common paths directly.
             if len(pages_data) <= 1:
                 for path in COMMON_PATHS:
                     if len(pages_data) >= max_pages:
@@ -208,14 +190,29 @@ def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
                     if norm in visited:
                         continue
                     visited.add(norm)
-                    page_soup, final_url = fetch_page(candidate, browser)
+                    page_soup, final_url = await fetch_page_async(candidate, browser)
                     if page_soup:
                         pages_data.append(extract_page_data(final_url, page_soup))
-                    time.sleep(0.2)
+                    await asyncio.sleep(0.2)
 
             return pages_data
         finally:
-            browser.close()
+            await browser.close()
+
+
+def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
+    """Run async Playwright crawl in a dedicated thread with ProactorEventLoop (required for subprocesses on Windows)."""
+    def run_in_thread():
+        loop = asyncio.ProactorEventLoop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(_async_crawl_website(base_url, max_pages))
+        finally:
+            loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_in_thread)
+        return future.result()
 
 
 def run_crawler_agent(state: dict) -> dict:
@@ -228,7 +225,6 @@ def run_crawler_agent(state: dict) -> dict:
         state["pages_crawled"] = 0
         return state
 
-    # Ensure URL has scheme
     if not website_url.startswith("http"):
         website_url = "https://" + website_url
 
