@@ -26,14 +26,56 @@ ISSUE_SEVERITY = {
     "outdated_http_protocol": "info",
 }
 
+# Human-readable descriptions for the PDF/report template, which expects
+# issue.get('description', '') — previously always blank because the dicts
+# only carried "issue" (a raw string like "thin_content:429_words"), not a
+# "description" field. {detail} is filled in from whatever follows the colon
+# in the raw issue string, e.g. "429_words" -> "Page has only 429 words..."
+ISSUE_DESCRIPTIONS = {
+    "missing_title": "Page is missing a title tag entirely.",
+    "missing_meta_description": "Page is missing a meta description.",
+    "missing_h1": "Page has no H1 heading tag.",
+    "multiple_h1": "Page has more than one H1 tag ({detail}) — search engines expect exactly one.",
+    "missing_alt_text": "{detail} on this page are missing alt text.",
+    "thin_content": "Page has low text content ({detail}) — thin content can hurt rankings.",
+    "missing_canonical": "Page is missing a canonical tag.",
+    "missing_viewport_meta": "Page is missing a mobile viewport meta tag.",
+    "missing_llms_txt": "Site does not have an llms.txt file to guide AI/LLM crawlers.",
+    "high_js_rendering_dependency": "{detail} of this page's content only appears after JavaScript "
+                                     "runs, which AI/LLM crawlers typically can't see.",
+    "page_too_large": "Page download size is {detail}, above the recommended 5MB budget.",
+    "poor_lcp": "Largest Contentful Paint is {detail}, well above Google's 2.5s 'good' threshold.",
+    "poor_tti": "Time to Interactive is {detail}, above Google's 3.8s 'good' threshold.",
+    "unoptimized_images": "{detail} on this page are unoptimized and could be compressed.",
+    "outdated_http_protocol": "Site is not using HTTP/2, which can slow down page loads.",
+}
+
+
+def _build_description(issue_string: str, key: str) -> str:
+    """Fill in the human-readable template for this issue key, substituting
+    {detail} with whatever followed the colon in the raw issue string
+    (e.g. "thin_content:429_words" -> detail="429_words" -> "429 words")."""
+    template = ISSUE_DESCRIPTIONS.get(key)
+    if not template:
+        return issue_string.replace("_", " ").replace(":", " — ")
+    detail = ""
+    if ":" in issue_string:
+        detail = issue_string.split(":", 1)[1].replace("_", " ")
+    return template.format(detail=detail) if "{detail}" in template else template
+
 
 def build_seo_issues(pages: List[dict]) -> List[dict]:
     """
     Converts each page's flat `issues` list (written by crawler_agent.py and
-    performance_agent.py) into the structured {url, issue, severity} records
-    the rest of scoring expects. This is the fix for the original bug:
-    state["seo_issues"] was never populated from crawled_pages, so technical_score
-    always deducted zero points regardless of what the crawler found.
+    performance_agent.py) into the structured records the rest of the
+    pipeline expects in state["seo_issues"].
+
+    Includes both the original compact "issue" string (used internally for
+    scoring) AND "description" / "issue_type" fields, since pdf_service.py's
+    PDF template reads issue.get('description', '') and
+    issue.get('issue_type', '') specifically — those were previously absent
+    from this dict entirely, which is why "Warnings (N)" rendered with the
+    correct count but every bullet underneath it was blank.
     """
     structured = []
     for page in pages:
@@ -43,6 +85,8 @@ def build_seo_issues(pages: List[dict]) -> List[dict]:
                 "url": page.get("url"),
                 "issue": issue,
                 "issue_key": key,
+                "issue_type": key,
+                "description": _build_description(issue, key),
                 "severity": ISSUE_SEVERITY.get(key, "warning"),
             })
     return structured
