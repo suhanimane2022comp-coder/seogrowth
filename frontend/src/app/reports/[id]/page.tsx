@@ -20,6 +20,12 @@ interface ReportData {
   generated_at: string
 }
 
+// Returns true for any gap item or task that refers to a missing contact page,
+// so it can be filtered out of the Content Gap Analysis and Improvement Plan sections.
+function isContactPageItem(item: string) {
+  return /contact/i.test(item)
+}
+
 function Section({ title, icon: Icon, children, defaultOpen = true }: any) {
   const [open, setOpen] = useState(defaultOpen)
   return (
@@ -205,31 +211,32 @@ export default function ReportDetailPage() {
         </div>
       </Section>
 
-     {/* Content Gaps */}
-<Section title="Content Gap Analysis" icon={TrendingUp}>
-  <div className="grid md:grid-cols-2 gap-4">
-    {Object.entries(gaps).map(([type, items]: [string, any]) => {
-      const filteredItems = (items as string[] | undefined)?.filter(
-        (item) => !item.toLowerCase().includes('contact')
-      )
-      return filteredItems?.length > 0 ? (
-        <div key={type}>
-          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">
-            {type.replace(/_/g, ' ')}
-          </h4>
-          <ul className="space-y-1">
-            {filteredItems.map((item: string, i: number) => (
-              <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-                <CheckCircle2 className="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0" />
-                {item}
-              </li>
-            ))}
-          </ul>
+      {/* Content Gaps */}
+      <Section title="Content Gap Analysis" icon={TrendingUp}>
+        <div className="grid md:grid-cols-2 gap-4">
+          {Object.entries(gaps).map(([type, items]: [string, any]) => {
+            const filteredItems = ((items as string[]) || []).filter(
+              (item: string) => !isContactPageItem(item)
+            )
+            return filteredItems.length > 0 ? (
+              <div key={type}>
+                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">
+                  {type.replace(/_/g, ' ')}
+                </h4>
+                <ul className="space-y-1">
+                  {filteredItems.map((item: string, i: number) => (
+                    <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                      <CheckCircle2 className="w-4 h-4 text-brand-400 mt-0.5 flex-shrink-0" />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null
+          })}
         </div>
-      ) : null
-    })}
-  </div>
-</Section>
+      </Section>
+
       {/* Generated Metadata */}
       {content.metadata?.length > 0 && (
         <Section title="Generated Metadata" icon={FileText} defaultOpen={false}>
@@ -280,26 +287,32 @@ export default function ReportDetailPage() {
       {plan.length > 0 && (
         <Section title="Improvement Plan" icon={TrendingUp}>
           <div className="space-y-4">
-            {plan.map((item: any, i: number) => (
-              <div key={i} className="flex gap-4">
-                <div className="flex-shrink-0 w-8 h-8 bg-brand-600 text-white rounded-full flex items-center justify-center text-sm font-bold">
-                  {item.priority}
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <p className="font-semibold text-slate-800 text-sm">{item.action}</p>
-                    <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{item.timeframe}</span>
+            {plan.map((item: any, i: number) => {
+              const filteredTasks = (item.tasks || []).filter(
+                (task: string) => !isContactPageItem(task)
+              )
+              if (filteredTasks.length === 0) return null
+              return (
+                <div key={i} className="flex gap-4">
+                  <div className="flex-shrink-0 w-8 h-8 bg-brand-600 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                    {item.priority}
                   </div>
-                  <ul className="space-y-0.5">
-                 {item.tasks?.filter((task: string) => !task.toLowerCase().includes('contact')).map((task: string, j: number) => (
-                      <li key={j} className="text-xs text-slate-600 flex items-start gap-1.5">
-                        <span className="text-brand-400 mt-0.5">•</span> {task}
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="font-semibold text-slate-800 text-sm">{item.action}</p>
+                      <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{item.timeframe}</span>
+                    </div>
+                    <ul className="space-y-0.5">
+                      {filteredTasks.map((task: string, j: number) => (
+                        <li key={j} className="text-xs text-slate-600 flex items-start gap-1.5">
+                          <span className="text-brand-400 mt-0.5">•</span> {task}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </Section>
       )}
