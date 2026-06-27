@@ -8,13 +8,20 @@ def get_improvement_plan(state: dict) -> list:
     plan = []
 
     # Priority 1: Critical issues
-    critical = [i for i in issues if i["severity"] == "critical"]
+    # NOTE: issue dicts from score_agent.build_seo_issues() use the key
+    # "issue" (e.g. "thin_content:429_words"), not "description" — that key
+    # never existed, so this previously failed silently: critical issues
+    # would only ever show up here if any existed AND the key matched, and
+    # since most real-world issues are "warning" severity, this block was
+    # rarely even reached. Using "issue" (falling back to "issue_key", then
+    # a placeholder) so a real list always renders instead of an empty bullet.
+    critical = [i for i in issues if i.get("severity") == "critical"]
     if critical:
         plan.append({
             "priority": 1,
             "timeframe": "Week 1-2",
             "action": "Fix Critical Technical Issues",
-            "tasks": [i["description"] for i in critical[:5]]
+            "tasks": [i.get("issue") or i.get("issue_key") or "Unspecified issue" for i in critical[:5]]
         })
 
     # Priority 2: Content gaps
@@ -80,6 +87,15 @@ def run_report_agent(state: dict) -> dict:
 
     improvement_plan = get_improvement_plan(state)
 
+    # Derive total/critical issue counts directly from seo_issues instead of
+    # reading state["total_issues"] / state["critical_issues"], which nothing
+    # in the pipeline ever writes. This is the actual cause of the executive
+    # summary always reading "0 issues... 0 critical issues" even when
+    # seo_issues had real entries (proof: seo_scores already reflected them —
+    # Content Quality dropping to 30/100 was driven by these same issues).
+    total_issues = len(issues)
+    critical_issues_count = len([i for i in issues if i.get("severity") == "critical"])
+
     # Score grade
     overall = scores.get("overall_score", 0)
     if overall >= 80:
@@ -106,12 +122,12 @@ def run_report_agent(state: dict) -> dict:
             "grade": grade,
             "grade_label": grade_label,
             "pages_analyzed": len(pages),
-            "total_issues": state.get("total_issues", 0),
-            "critical_issues": state.get("critical_issues", 0),
+            "total_issues": total_issues,
+            "critical_issues": critical_issues_count,
             "keyword_opportunities": state.get("total_keywords", 0),
             "summary": f"{state.get('business_name')} received an SEO score of {overall}/100 ({grade_label}). "
-                       f"We found {state.get('total_issues', 0)} issues across {len(pages)} pages analyzed, "
-                       f"with {state.get('critical_issues', 0)} critical issues requiring immediate attention. "
+                       f"We found {total_issues} issues across {len(pages)} pages analyzed, "
+                       f"with {critical_issues_count} critical issues requiring immediate attention. "
                        f"We identified {state.get('total_keywords', 0)} keyword opportunities and "
                        f"{len(content_gaps.get('missing_pages', []))} missing page opportunities."
         },
@@ -120,6 +136,8 @@ def run_report_agent(state: dict) -> dict:
         "technical_seo": {
             "robots_txt": state.get("robots_txt", {}),
             "sitemap": state.get("sitemap", {}),
+            "llms_txt": state.get("llms_txt", {}),
+            "https_redirect": state.get("https_redirect", {}),
             "pages_crawled": len(pages),
             "issues": issues
         },
