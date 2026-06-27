@@ -1,11 +1,9 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
-from typing import List, Optional
+from typing import List
 import time
-import asyncio
-import concurrent.futures
-from playwright.async_api import async_playwright
+import os
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -16,6 +14,8 @@ COMMON_PATHS = [
     "/contact", "/contact-us", "/about", "/about-us", "/services",
     "/pricing", "/faq", "/blog", "/privacy-policy", "/terms",
 ]
+
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
 
 def normalize_domain(netloc: str) -> str:
@@ -29,21 +29,32 @@ def normalize_url(url: str) -> str:
     return urlunparse((parsed.scheme, netloc, path, parsed.params, parsed.query, ""))
 
 
-async def fetch_page_async(url: str, browser, timeout: int = 20000):
-    page = None
+def fetch_page(url: str, timeout: int = 30):
+    """
+    Fetch page with JS rendering via ScraperAPI if key is available,
+    otherwise fall back to plain requests.
+    Returns (soup, final_url) or (None, None) on failure.
+    """
     try:
-        page = await browser.new_page(user_agent=HEADERS["User-Agent"])
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
-        await page.wait_for_timeout(800)
-        html = await page.content()
-        final_url = page.url
-        return BeautifulSoup(html, "lxml"), final_url
+        if SCRAPER_API_KEY:
+            # ScraperAPI renders JavaScript — same result as Playwright
+            api_url = "http://api.scraperapi.com"
+            params = {
+                "api_key": SCRAPER_API_KEY,
+                "url": url,
+                "render": "true",  # enables JS rendering
+            }
+            response = requests.get(api_url, params=params, timeout=timeout)
+        else:
+            # Local development fallback (no JS rendering)
+            response = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+
+        if response.status_code == 200:
+            return BeautifulSoup(response.text, "lxml"), url
+        return None, None
     except Exception as e:
         print(f"Failed to fetch {url}: {e}")
         return None, None
-    finally:
-        if page:
-            await page.close()
 
 
 def check_robots_txt(base_url: str) -> dict:
@@ -139,80 +150,59 @@ def extract_page_data(url: str, soup: BeautifulSoup) -> dict:
     }
 
 
-async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            soup, resolved_url = await fetch_page_async(base_url, browser)
-            if not soup:
-                return []
-
-            base_domain = normalize_domain(urlparse(resolved_url).netloc)
-            visited = set()
-            pages_data = []
-
-            homepage_norm = normalize_url(resolved_url)
-            to_visit = [resolved_url]
-            visited.add(homepage_norm)
-
-            first = True
-            while to_visit and len(visited) <= max_pages:
-                url = to_visit.pop(0)
-
-                if first:
-                    page_soup, final_url = soup, resolved_url
-                    first = False
-                else:
-                    page_soup, final_url = await fetch_page_async(url, browser)
-                    if not page_soup:
-                        continue
-                    norm = normalize_url(final_url)
-                    if norm in visited and final_url != url:
-                        continue
-                    visited.add(norm)
-
-                page_data = extract_page_data(final_url, page_soup)
-                pages_data.append(page_data)
-
-                for link in page_data.get("internal_links", []):
-                    if link not in visited and normalize_domain(urlparse(link).netloc) == base_domain:
-                        to_visit.append(link)
-                        visited.add(link)
-
-                await asyncio.sleep(0.3)
-
-            if len(pages_data) <= 1:
-                for path in COMMON_PATHS:
-                    if len(pages_data) >= max_pages:
-                        break
-                    candidate = urljoin(f"https://{urlparse(resolved_url).netloc}", path)
-                    norm = normalize_url(candidate)
-                    if norm in visited:
-                        continue
-                    visited.add(norm)
-                    page_soup, final_url = await fetch_page_async(candidate, browser)
-                    if page_soup:
-                        pages_data.append(extract_page_data(final_url, page_soup))
-                    await asyncio.sleep(0.2)
-
-            return pages_data
-        finally:
-            await browser.close()
-
-
 def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
-    """Run async Playwright crawl in a dedicated thread with ProactorEventLoop (required for subprocesses on Windows)."""
-    def run_in_thread():
-        loop = asyncio.ProactorEventLoop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(_async_crawl_website(base_url, max_pages))
-        finally:
-            loop.close()
+    soup, resolved_url = fetch_page(base_url)
+    if not soup:
+        return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(run_in_thread)
-        return future.result()
+    base_domain = normalize_domain(urlparse(resolved_url).netloc)
+    visited = set()
+    pages_data = []
+
+    to_visit = [resolved_url]
+    visited.add(normalize_url(resolved_url))
+
+    first = True
+    while to_visit and len(visited) <= max_pages:
+        url = to_visit.pop(0)
+
+        if first:
+            page_soup, final_url = soup, resolved_url
+            first = False
+        else:
+            page_soup, final_url = fetch_page(url)
+            if not page_soup:
+                continue
+            norm = normalize_url(final_url)
+            if norm in visited and final_url != url:
+                continue
+            visited.add(norm)
+
+        page_data = extract_page_data(final_url, page_soup)
+        pages_data.append(page_data)
+
+        for link in page_data.get("internal_links", []):
+            if link not in visited and normalize_domain(urlparse(link).netloc) == base_domain:
+                to_visit.append(link)
+                visited.add(link)
+
+        time.sleep(1)  # ScraperAPI needs slightly more breathing room
+
+    if len(pages_data) <= 1:
+        for path in COMMON_PATHS:
+            if len(pages_data) >= max_pages:
+                break
+            candidate = urljoin(f"https://{urlparse(resolved_url).netloc}", path)
+            norm = normalize_url(candidate)
+            if norm in visited:
+                continue
+            visited.add(norm)
+            page_soup, final_url = fetch_page(candidate)
+            if page_soup:
+                pages_data.append(extract_page_data(final_url, page_soup))
+            time.sleep(1)
+
+    return pages_data
 
 
 def run_crawler_agent(state: dict) -> dict:
