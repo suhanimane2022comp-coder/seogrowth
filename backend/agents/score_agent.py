@@ -105,11 +105,29 @@ def run_score_agent(state: dict) -> dict:
     content = state.get("generated_content", {})
 
     # ---------------- Technical SEO Score (0-100) ----------------
+    # FIX: previously subtracted -10/-5 per issue from a single site-wide
+    # 100-point pool. On a 12-page crawl where most pages share the same
+    # handful of minor issues (thin content, missing canonical, missing
+    # meta description), those penalties stacked additively across all
+    # pages combined -- e.g. 12 pages x ~3 warnings x -5 = -180, flooring at
+    # 0 regardless of how minor any single issue actually was. Every other
+    # category (content/metadata/performance/GEO below) already scores
+    # per-page and averages; technical_score now does the same, so one
+    # page's issues can't make the whole site read as 0/100 "Critical".
     technical_score = 100.0
     has_website = bool(state.get("website_url"))
 
     if not has_website:
         technical_score = 30
+    elif not pages:
+        # No pages crawled at all (e.g. crawl failed) -- fall back to the
+        # site-level checks only, same as before.
+        technical_score = 100.0
+        if not state.get("robots_txt", {}).get("exists"):
+            technical_score -= 10
+        if not state.get("sitemap", {}).get("exists"):
+            technical_score -= 10
+        technical_score = max(0, min(100, technical_score))
     else:
         # Performance-category issues (poor_lcp, page_too_large, etc.) are
         # scored exclusively by performance_score below — counting them here
@@ -118,12 +136,24 @@ def run_score_agent(state: dict) -> dict:
         # technical SEO fundamentals (title/H1/canonical/robots/sitemap).
         performance_keys = {"page_too_large", "poor_lcp", "poor_tti", "unoptimized_images",
                              "outdated_http_protocol", "high_js_rendering_dependency", "missing_llms_txt"}
-        technical_issues = [i for i in issues if i["issue_key"] not in performance_keys]
-        critical_issues = [i for i in technical_issues if i["severity"] == "critical"]
-        warning_issues = [i for i in technical_issues if i["severity"] == "warning"]
-        technical_score -= len(critical_issues) * 10
-        technical_score -= len(warning_issues) * 5
+        technical_issue_keys = {"missing_title", "missing_meta_description", "missing_h1",
+                                 "multiple_h1", "missing_alt_text", "thin_content", "missing_canonical"}
 
+        per_page_scores = []
+        for p in pages:
+            page_score = 100.0
+            for issue in p.get("issues", []):
+                key = _issue_key(issue)
+                if key not in technical_issue_keys:
+                    continue
+                severity = ISSUE_SEVERITY.get(key, "warning")
+                page_score -= 10 if severity == "critical" else 5
+            per_page_scores.append(max(0, page_score))
+        technical_score = sum(per_page_scores) / len(per_page_scores) if per_page_scores else 100.0
+
+        # Site-level checks (robots.txt/sitemap) apply once to the whole
+        # site, not per page, so they're subtracted from the averaged score
+        # rather than folded into the per-page loop above.
         if not state.get("robots_txt", {}).get("exists"):
             technical_score -= 10
         if not state.get("sitemap", {}).get("exists"):
@@ -209,10 +239,23 @@ def run_score_agent(state: dict) -> dict:
     # ---------------- GEO Score (0-100) ----------------
     # Wired to performance_agent.py's rendering_gap_pct + llms_txt check.
     # Stays None if that data was never collected, same reasoning as above.
+    #
+    # FIX: previously every page counted equally in the average. On a site
+    # like an SPA/store where the homepage is a heavy JS bundle (~99%
+    # rendering gap -- almost nothing in the raw HTML) but product/category
+    # pages are simple and mostly server-rendered (~0% gap), an equal
+    # average buries the one page that actually matters most: AI/LLM
+    # crawlers typically start at (and weight heavily) the homepage, so a
+    # 99% gap there is a real, severe problem that an 11-page average was
+    # hiding behind a flattering site-wide number (86/100 "Excellent" vs.
+    # HOTH's F grade on the same homepage). The homepage now counts for
+    # HOMEPAGE_WEIGHT times as much as any other single page.
+    HOMEPAGE_WEIGHT = 4
     geo_score = None
     pages_with_geo_data = [p for p in pages if p.get("rendering_gap_pct") is not None]
     if pages_with_geo_data:
-        per_page_scores = []
+        weighted_scores = []
+        homepage_url = (state.get("website_url") or "").rstrip("/")
         for p in pages_with_geo_data:
             page_geo_score = 100.0
             gap = p.get("rendering_gap_pct", 0)
@@ -226,8 +269,14 @@ def run_score_agent(state: dict) -> dict:
                 page_geo_score -= 35
             elif gap > 10:
                 page_geo_score -= 15
-            per_page_scores.append(max(0, page_geo_score))
-        geo_score = sum(per_page_scores) / len(per_page_scores)
+            page_geo_score = max(0, page_geo_score)
+
+            page_url = (p.get("url") or "").rstrip("/")
+            is_homepage = page_url == homepage_url or page_url == homepage_url.replace("https://", "").replace("http://", "")
+            weight = HOMEPAGE_WEIGHT if is_homepage else 1
+            weighted_scores.extend([page_geo_score] * weight)
+
+        geo_score = sum(weighted_scores) / len(weighted_scores)
         if not state.get("llms_txt", {}).get("exists"):
             geo_score -= 10
         geo_score = round(max(0, min(100, geo_score)), 1)

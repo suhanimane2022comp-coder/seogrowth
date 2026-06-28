@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
-from typing import List
+from typing import List, Optional, Tuple
 import time
 import asyncio
 import concurrent.futures
@@ -16,6 +16,26 @@ COMMON_PATHS = [
     "/contact", "/contact-us", "/about", "/about-us", "/services",
     "/pricing", "/faq", "/blog", "/privacy-policy", "/terms",
 ]
+
+# Removed "--single-process" and "--no-zygote": these are known to make
+# Chromium unstable under any concurrent load or resource pressure (e.g. two
+# analyses running at once, or low disk/memory) on Windows specifically.
+# When the single renderer process dies, the ENTIRE browser handle dies with
+# it, which is exactly the "Target page, context or browser has been closed"
+# error seen mid-crawl -- every fetch after that point fails, the homepage
+# fetch result gets thrown away, and the whole analysis silently produces 0
+# crawled_pages. Running each tab as its own normal process trades a little
+# memory for not taking the whole crawl down with one bad page.
+BROWSER_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-accelerated-2d-canvas",
+    "--no-first-run",
+    "--disable-gpu",
+]
+
+MAX_FETCH_RETRIES = 2
 
 
 def normalize_domain(netloc: str) -> str:
@@ -123,6 +143,13 @@ def extract_page_data(url: str, soup: BeautifulSoup) -> dict:
     }
 
 
+def _is_browser_dead_error(exc: Exception) -> bool:
+    """Detect the 'browser/context/page has been closed' family of errors so
+    the caller can decide to relaunch rather than just giving up on this URL."""
+    msg = str(exc).lower()
+    return "has been closed" in msg or "target closed" in msg or "browser has disconnected" in msg
+
+
 async def fetch_page_async(url: str, browser, timeout: int = 30000):
     """
     Fetch page with full JS rendering using Playwright.
@@ -134,6 +161,11 @@ async def fetch_page_async(url: str, browser, timeout: int = 30000):
     could never have detected while images were aborted at the network level.
     This makes each page fetch slower; that trade-off was confirmed as
     intentional in favor of accuracy.
+
+    Raises the underlying exception back to the caller when it looks like
+    the browser itself died (rather than swallowing it and returning None),
+    so _async_crawl_website can tell "this one page failed" apart from
+    "the browser is gone, relaunch it" and recover instead of returning [].
     """
     page = None
     try:
@@ -155,31 +187,56 @@ async def fetch_page_async(url: str, browser, timeout: int = 30000):
 
     except Exception as e:
         print(f"Playwright failed to fetch {url}: {e}")
+        if _is_browser_dead_error(e):
+            raise
         return None, None
     finally:
         if page:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+async def _launch_browser(p):
+    return await p.chromium.launch(headless=True, args=BROWSER_ARGS)
+
+
+async def _fetch_with_recovery(url: str, p, browser, timeout: int = 30000) -> Tuple[Optional[BeautifulSoup], Optional[str], object]:
+    """
+    Wraps fetch_page_async with retries AND browser relaunch-on-death.
+    Returns (soup, final_url, browser) — browser is returned because a
+    relaunch replaces the handle the caller must keep using for subsequent
+    fetches in the same crawl.
+    """
+    for attempt in range(1, MAX_FETCH_RETRIES + 1):
+        try:
+            soup, final_url = await fetch_page_async(url, browser, timeout)
+            return soup, final_url, browser
+        except Exception as e:
+            if _is_browser_dead_error(e) and attempt < MAX_FETCH_RETRIES:
+                print(f"Browser died while fetching {url}, relaunching (attempt {attempt}/{MAX_FETCH_RETRIES})...")
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                browser = await _launch_browser(p)
+                await asyncio.sleep(1)
+                continue
+            print(f"Giving up on {url} after browser-death retry: {e}")
+            return None, None, browser
+    return None, None, browser
 
 
 async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:
-    """Full async crawl using Playwright browser."""
+    """Full async crawl using Playwright browser, with auto-relaunch if the
+    browser process dies partway through (resource pressure, crashes, etc.)
+    instead of aborting the entire crawl and returning an empty list."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
-                "--no-zygote",
-                "--single-process",
-                "--disable-gpu",
-            ]
-        )
+        browser = await _launch_browser(p)
         try:
             # Fetch homepage
-            soup, resolved_url = await fetch_page_async(base_url, browser)
+            soup, resolved_url, browser = await _fetch_with_recovery(base_url, p, browser)
             if not soup:
                 print(f"Failed to fetch homepage: {base_url}")
                 return []
@@ -199,7 +256,7 @@ async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]
                     page_soup, final_url = soup, resolved_url
                     first = False
                 else:
-                    page_soup, final_url = await fetch_page_async(url, browser)
+                    page_soup, final_url, browser = await _fetch_with_recovery(url, p, browser)
                     if not page_soup:
                         continue
                     norm = normalize_url(final_url)
@@ -230,7 +287,7 @@ async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]
                     if norm in visited:
                         continue
                     visited.add(norm)
-                    page_soup, final_url = await fetch_page_async(candidate, browser)
+                    page_soup, final_url, browser = await _fetch_with_recovery(candidate, p, browser)
                     if page_soup:
                         pages_data.append(extract_page_data(final_url, page_soup))
                     await asyncio.sleep(0.5)
@@ -238,7 +295,10 @@ async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]
             return pages_data
 
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
 
 def crawl_website(base_url: str, max_pages: int = 15) -> List[dict]:

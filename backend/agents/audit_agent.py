@@ -1,113 +1,92 @@
 from typing import List, Dict
+from agents.score_agent import build_seo_issues
 
 
 def run_audit_agent(state: dict) -> dict:
-    """Analyze crawled pages and generate SEO issues."""
+    """
+    Build the final state["seo_issues"] list.
+
+    Per-page issues (missing title/meta/H1, thin content, missing alt text,
+    missing canonical, etc.) are already detected by crawler_agent.py and
+    performance_agent.py and stored on each page's "issues" list. This agent
+    converts those into structured records via score_agent.build_seo_issues
+    (the single source of truth for issue_key -> severity -> description),
+    then adds the checks that genuinely can't be done per-page:
+      - site-level: robots.txt / sitemap.xml existence
+      - cross-page: duplicate <title> tags
+
+    PREVIOUSLY this file ALSO re-detected title/meta/h1/alt/thin-content
+    issues from scratch, on a different dict schema than build_seo_issues
+    produces (page_url/issue_type vs url/issue/issue_key). Whichever code
+    path's issues ended up in state["seo_issues"] determined behavior, and
+    real bugs were traced directly to that duplication:
+      1. Severity mismatch: this file scored missing_meta_description as
+         "critical"; score_agent.ISSUE_SEVERITY scores it "warning". Same
+         real-world issue, two different severities depending on which
+         agent's copy of it survived.
+      2. Technical score collapse: with the same issues effectively counted
+         under this file's harsher severities, technical_score's
+         per-critical/-warning deductions stacked up far higher than the
+         site's real problems warranted (this is why a site with one
+         missing meta description here, a 32-word page there, showed
+         Technical SEO at 0/100).
+      3. "Unspecified issue" in the Improvement Plan: report_agent.py reads
+         i.get("issue") / i.get("issue_key"); this file's dicts had neither
+         (only "issue_type"), so every Priority 1 bullet silently fell back
+         to the placeholder string.
+      4. Untraceable issues in the PDF: this file used "page_url" while
+         pdf_service.py / report_agent.py expect "url" — so issues in the
+         generated report couldn't be reliably tied back to which page they
+         were actually about.
+    """
     pages = state.get("crawled_pages", [])
-    all_issues = []
-    title_set = {}
 
+    all_issues = build_seo_issues(pages)
+
+    # Cross-page check: duplicate titles can't be detected by crawler_agent
+    # (it only sees one page at a time), so it stays here.
+    title_seen = {}
     for page in pages:
-        url = page["url"]
-        issues = []
-
-        # Title checks
-        if not page.get("title"):
-            issues.append({
-                "page_url": url,
-                "issue_type": "missing_title",
-                "severity": "critical",
-                "description": "Page is missing a title tag."
+        t = page.get("title")
+        url = page.get("url")
+        if not t:
+            continue
+        if t in title_seen:
+            all_issues.append({
+                "url": url,
+                "issue": f"duplicate_title:{title_seen[t]}",
+                "issue_key": "duplicate_title",
+                "issue_type": "duplicate_title",
+                "description": f"Duplicate title also found on: {title_seen[t]}",
+                "severity": "warning",
             })
         else:
-            t = page["title"]
-            if t in title_set:
-                issues.append({
-                    "page_url": url,
-                    "issue_type": "duplicate_title",
-                    "severity": "warning",
-                    "description": f"Duplicate title found also on: {title_set[t]}"
-                })
-            else:
-                title_set[t] = url
-            if len(t) > 60:
-                issues.append({
-                    "page_url": url,
-                    "issue_type": "title_too_long",
-                    "severity": "warning",
-                    "description": f"Title is {len(t)} characters (recommended: under 60)."
-                })
+            title_seen[t] = url
 
-        # Meta description checks
-        if not page.get("meta_description"):
-            issues.append({
-                "page_url": url,
-                "issue_type": "missing_meta_description",
-                "severity": "critical",
-                "description": "Page is missing a meta description."
-            })
-        elif len(page["meta_description"]) > 160:
-            issues.append({
-                "page_url": url,
-                "issue_type": "meta_description_too_long",
-                "severity": "warning",
-                "description": f"Meta description is {len(page['meta_description'])} characters (recommended: under 160)."
-            })
+    # Site-level checks: robots.txt / sitemap.xml — not page-specific, and
+    # nothing else in the pipeline checks these. Same schema as
+    # build_seo_issues' output so report_agent/pdf_service don't need to
+    # special-case them.
+    website_url = state.get("website_url", "")
 
-        # H1 checks
-        h1 = page.get("h1")
-        if not h1:
-            issues.append({
-                "page_url": url,
-                "issue_type": "missing_h1",
-                "severity": "critical",
-                "description": "Page is missing an H1 tag."
-            })
-
-        # Alt text
-        if page.get("missing_alt_count", 0) > 0:
-            issues.append({
-                "page_url": url,
-                "issue_type": "missing_alt_text",
-                "severity": "warning",
-                "description": f"{page['missing_alt_count']} image(s) missing alt text."
-            })
-
-        # Thin content
-        if page.get("word_count", 0) < 300:
-            issues.append({
-                "page_url": url,
-                "issue_type": "thin_content",
-                "severity": "warning",
-                "description": f"Page has only {page.get('word_count', 0)} words. Recommended: 300+."
-            })
-
-        # Missing canonical
-        if not page.get("canonical"):
-            issues.append({
-                "page_url": url,
-                "issue_type": "missing_canonical",
-                "severity": "info",
-                "description": "Page is missing a canonical tag."
-            })
-
-        all_issues.extend(issues)
-
-    # Technical checks
     if not state.get("robots_txt", {}).get("exists"):
         all_issues.append({
-            "page_url": state.get("website_url", ""),
+            "url": website_url,
+            "issue": "missing_robots_txt",
+            "issue_key": "missing_robots_txt",
             "issue_type": "missing_robots_txt",
+            "description": "robots.txt file not found.",
             "severity": "critical",
-            "description": "robots.txt file not found."
         })
 
     if not state.get("sitemap", {}).get("exists"):
         all_issues.append({
-            "page_url": state.get("website_url", ""),
+            "url": website_url,
+            "issue": "missing_sitemap",
+            "issue_key": "missing_sitemap",
             "issue_type": "missing_sitemap",
+            "description": "sitemap.xml not found.",
             "severity": "critical",
-            "description": "sitemap.xml not found."
         })
 
     state["seo_issues"] = all_issues

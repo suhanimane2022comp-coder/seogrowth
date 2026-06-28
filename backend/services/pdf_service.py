@@ -5,7 +5,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 import io
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 def generate_pdf_report(report_data: Dict[str, Any]) -> bytes:
@@ -37,13 +37,19 @@ def generate_pdf_report(report_data: Dict[str, Any]) -> bytes:
     story.append(Spacer(1, 15))
 
     # Score Table
+    # NOTE: performance_score / geo_score are populated by performance_agent.py
+    # (now wired into workflow.py) via score_agent.py, but can still be None
+    # if that agent never ran for older/cached state -- _fmt_score handles
+    # that by printing "Not Measured" instead of crashing on f"{None}/100".
     score_data = [
         ["Metric", "Score", "Rating"],
-        ["Overall SEO Score", f"{scores.get('overall_score', 0)}/100", _get_rating(scores.get('overall_score', 0))],
-        ["Technical SEO", f"{scores.get('technical_score', 0)}/100", _get_rating(scores.get('technical_score', 0))],
-        ["Content Quality", f"{scores.get('content_score', 0)}/100", _get_rating(scores.get('content_score', 0))],
-        ["Keyword Coverage", f"{scores.get('keyword_score', 0)}/100", _get_rating(scores.get('keyword_score', 0))],
-        ["Metadata Quality", f"{scores.get('metadata_score', 0)}/100", _get_rating(scores.get('metadata_score', 0))],
+        ["Overall SEO Score", _fmt_score(scores.get('overall_score')), _get_rating(scores.get('overall_score'))],
+        ["Technical SEO", _fmt_score(scores.get('technical_score')), _get_rating(scores.get('technical_score'))],
+        ["Content Quality", _fmt_score(scores.get('content_score')), _get_rating(scores.get('content_score'))],
+        ["Keyword Coverage", _fmt_score(scores.get('keyword_score')), _get_rating(scores.get('keyword_score'))],
+        ["Metadata Quality", _fmt_score(scores.get('metadata_score')), _get_rating(scores.get('metadata_score'))],
+        ["Performance", _fmt_score(scores.get('performance_score')), _get_rating(scores.get('performance_score'))],
+        ["GEO (AI/LLM Readiness)", _fmt_score(scores.get('geo_score')), _get_rating(scores.get('geo_score'))],
     ]
 
     score_table = Table(score_data, colWidths=[200, 100, 150])
@@ -74,12 +80,79 @@ def generate_pdf_report(report_data: Dict[str, Any]) -> bytes:
         if critical:
             story.append(Paragraph(f"Critical Issues ({len(critical)})", h3_style))
             for issue in critical[:10]:
-                story.append(Paragraph(f"• <b>{issue.get('issue_type', '').replace('_', ' ').title()}</b>: {issue.get('description', '')}", body_style))
+                url_suffix = f" <i>({issue.get('url')})</i>" if issue.get("url") else ""
+                story.append(Paragraph(
+                    f"• <b>{issue.get('issue_type', '').replace('_', ' ').title()}</b>: "
+                    f"{issue.get('description', '')}{url_suffix}",
+                    body_style
+                ))
 
         if warnings:
             story.append(Paragraph(f"Warnings ({len(warnings)})", h3_style))
             for issue in warnings[:10]:
-                story.append(Paragraph(f"• {issue.get('description', '')}", body_style))
+                url_suffix = f" <i>({issue.get('url')})</i>" if issue.get("url") else ""
+                story.append(Paragraph(f"• {issue.get('description', '')}{url_suffix}", body_style))
+        story.append(Spacer(1, 15))
+
+    # ----------------------------------------------------------------
+    # NEW: Performance & GEO detail section -- mirrors the HOTH-style
+    # report's "Performance Results" / "Generative Engine Optimization"
+    # pages (page weight breakdown, LCP/TTI, rendering gap %, llms.txt,
+    # HTTPS redirect). Pulled straight from technical_seo + pages_summary
+    # so this works whether the data is present (performance_check ran)
+    # or absent (older cached report state), without crashing either way.
+    # ----------------------------------------------------------------
+    technical = report_data.get("technical_seo", {})
+    pages = report_data.get("pages_summary", [])
+    pages_with_perf = [p for p in report_data.get("crawled_pages", pages) if p.get("performance")]
+
+    if scores.get("performance_score") is not None or scores.get("geo_score") is not None:
+        story.append(Paragraph("Performance & GEO (AI/LLM Readiness)", h2_style))
+
+        site_check_data = [
+            ["Check", "Result"],
+            ["llms.txt present", "Yes" if technical.get("llms_txt", {}).get("exists") else "No"],
+            ["HTTP → HTTPS redirect", _yesno(technical.get("https_redirect", {}).get("redirects_to_https"))],
+        ]
+        site_table = Table(site_check_data, colWidths=[250, 200])
+        site_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#dee2e6')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f8f9fa'), colors.white]),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        story.append(site_table)
+        story.append(Spacer(1, 10))
+
+        if pages_with_perf:
+            story.append(Paragraph("Per-Page Performance Detail", h3_style))
+            perf_rows = [["Page", "Weight", "LCP", "TTI", "Rendering Gap"]]
+            for p in pages_with_perf[:10]:
+                perf = p.get("performance", {})
+                gap = p.get("rendering_gap_pct")
+                perf_rows.append([
+                    (p.get("url", "")[:40] + "…") if len(p.get("url", "")) > 40 else p.get("url", ""),
+                    f"{perf.get('page_weight_mb', '—')}MB",
+                    f"{perf.get('lcp_seconds', '—')}s",
+                    f"{perf.get('tti_seconds', '—')}s",
+                    f"{gap}%" if gap is not None else "—",
+                ])
+            perf_table = Table(perf_rows, colWidths=[190, 60, 50, 50, 80])
+            perf_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#dee2e6')),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f8f9fa'), colors.white]),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ]))
+            story.append(perf_table)
         story.append(Spacer(1, 15))
 
     # Keywords
@@ -138,7 +211,25 @@ def generate_pdf_report(report_data: Dict[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
-def _get_rating(score: float) -> str:
+def _fmt_score(score: Optional[float]) -> str:
+    """scores dict can legitimately hold None for performance_score/geo_score
+    when performance_agent hasn't run -- guard against f"{None}/100"."""
+    if score is None:
+        return "Not Measured"
+    return f"{score}/100"
+
+
+def _yesno(value) -> str:
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    return "Unknown"
+
+
+def _get_rating(score: Optional[float]) -> str:
+    if score is None:
+        return "Not Measured"
     if score >= 80:
         return "Excellent"
     elif score >= 60:

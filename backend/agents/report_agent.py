@@ -17,11 +17,20 @@ def get_improvement_plan(state: dict) -> list:
     # a placeholder) so a real list always renders instead of an empty bullet.
     critical = [i for i in issues if i.get("severity") == "critical"]
     if critical:
+        # audit_agent.py now always populates "description" (human-readable)
+        # alongside "issue" (raw key, e.g. "thin_content:294_words") for
+        # every entry, so prefer description for plan tasks -- it reads as
+        # "Page is missing a meta description." instead of the raw key, and
+        # includes which URL it's about where relevant.
         plan.append({
             "priority": 1,
             "timeframe": "Week 1-2",
             "action": "Fix Critical Technical Issues",
-            "tasks": [i.get("issue") or i.get("issue_key") or "Unspecified issue" for i in critical[:5]]
+            "tasks": [
+                f"{i.get('description') or i.get('issue') or i.get('issue_key') or 'Unspecified issue'}"
+                f"{' (' + i['url'] + ')' if i.get('url') else ''}"
+                for i in critical[:5]
+            ]
         })
 
     # Priority 2: Content gaps
