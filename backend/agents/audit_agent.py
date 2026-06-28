@@ -90,8 +90,19 @@ def run_audit_agent(state: dict) -> dict:
         })
 
     state["seo_issues"] = all_issues
-    state["total_issues"] = len(all_issues)
-    state["critical_issues"] = len([i for i in all_issues if i["severity"] == "critical"])
-    state["warning_issues"] = len([i for i in all_issues if i["severity"] == "warning"])
+
+    # Count unique issue types (not per-page occurrences).
+    # e.g. "missing_canonical" on 11 pages = 1 unique issue, not 11.
+    unique_types = set(i["issue_type"] for i in all_issues)
+    unique_critical = set(
+        i["issue_type"] for i in all_issues if i["severity"] == "critical"
+    )
+    unique_warnings = set(
+        i["issue_type"] for i in all_issues if i["severity"] == "warning"
+    )
+
+    state["total_issues"] = len(unique_types)
+    state["critical_issues"] = len(unique_critical)
+    state["warning_issues"] = len(unique_warnings)
 
     return state

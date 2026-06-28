@@ -6,56 +6,106 @@ client = Groq(api_key=settings.GROQ_API_KEY)
 
 
 def generate_metadata(state: dict) -> list:
+    from urllib.parse import urlparse as _urlparse
     business_analysis = state.get("business_analysis", {})
     keywords = state.get("keywords", {})
-    primary_kws = keywords.get("primary", [])[:3]
+    primary_kws = keywords.get("primary", [])[:5]
+    secondary_kws = keywords.get("secondary", [])[:3]
+    pages = state.get("crawled_pages", [])
 
-    prompt = f"""
-You are an expert SEO copywriter.
+    def is_home(url):
+        path = _urlparse(url).path.rstrip("/") or "/"
+        return path in ("", "/")
 
-Generate SEO metadata for these pages for {state.get('business_name')}:
-- Home Page
-- About Page  
-- Services Page
-- Contact Page
-- {state.get('target_location', '')} Landing Page
+    def is_about(url):
+        path = _urlparse(url).path.rstrip("/").lower()
+        return path in ("/about", "/about-us")
 
-Business: {state.get('business_name')}
-Industry: {business_analysis.get('industry')}
-Primary Keywords: {', '.join(primary_kws)}
-Location: {state.get('target_location')}
+    def is_soft_404(page):
+        title = (page.get("title") or "").lower()
+        return any(p in title for p in ["not found", "404", "page not found", "error", "oops"])
 
-Return ONLY valid JSON array:
-[
-  {{
-    "page": "Home Page",
-    "title": "SEO optimized title under 60 chars",
-    "description": "Compelling meta description under 155 chars"
-  }}
-]
-"""
+    home_page = next((p for p in pages if is_home(p.get("url", "")) and not is_soft_404(p)), None)
+    about_page = next((p for p in pages if is_about(p.get("url", "")) and not is_soft_404(p)), None)
+
+    target_pages = []
+    if home_page:
+        target_pages.append(("Home Page", home_page))
+    if about_page:
+        target_pages.append(("About Page", about_page))
+
+    if not target_pages:
+        print("[content_agent] No valid Home/About pages found for metadata generation.")
+        return []
+
+    def build_page_context(label, page):
+        body_snippet = (page.get("body_text") or "")[:800].strip()
+        return (
+            "Page: " + label + "\n"
+            + "URL: " + str(page.get("url") or "") + "\n"
+            + "Current Title: " + str(page.get("title") or "None") + "\n"
+            + "Current Meta Description: " + str(page.get("meta_description") or "None") + "\n"
+            + "H1: " + str(page.get("h1") or "None") + "\n"
+            + "H2s: " + ", ".join(page.get("h2_tags", [])[:5]) + "\n"
+            + "Word Count: " + str(page.get("word_count", 0)) + "\n"
+            + "Page Content Snippet:\n" + body_snippet
+        )
+
+    pages_block = "\n\n---\n\n".join(
+        build_page_context(label, page) for label, page in target_pages
+    )
+
+    rules = (
+        "STRICT RULES:\n"
+        "- Title: max 60 chars. Include the most relevant primary keyword naturally. Be specific to the page.\n"
+        "- Description: max 155 chars. Include a keyword, describe what the page offers, give the user a reason to click.\n"
+        "- NO generic filler: no 'Contact us today', 'commitment to excellence', 'Professional Services', 'Expert services'.\n"
+        "- NO location stuffing like 'Serving India (Primary), Global (Secondary)'.\n"
+        "- Base everything strictly on the actual page content — do NOT invent services or claims not present.\n"
+    )
+
+    prompt = (
+        "You are a senior SEO copywriter. Write accurate, keyword-rich meta titles and descriptions.\n\n"
+        "Business: " + str(state.get("business_name")) + "\n"
+        "Industry: " + str(business_analysis.get("industry", "")) + "\n"
+        "Location: " + str(state.get("target_location", "")) + "\n"
+        "Primary Keywords: " + ", ".join(primary_kws) + "\n"
+        "Secondary Keywords: " + ", ".join(secondary_kws) + "\n\n"
+        "PAGES:\n" + pages_block + "\n\n"
+        + rules +
+        "\nReturn ONLY valid JSON array, no markdown:\n"
+        "[{\"page\": \"Home Page\", \"url\": \"...\", \"title\": \"...\", \"description\": \"...\"}]"
+    )
 
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=1000,
+            temperature=0.3,
+            max_tokens=800,
         )
         raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        raw = raw.strip()
-        return json.loads(raw)
+        return json.loads(raw.strip())
     except Exception as e:
-        print(f"[content_agent] generate_metadata Groq call/parse failed, using fallback: {e}")
-        return [
-            {"page": "Home Page", "title": f"{state.get('business_name')} | Professional Services", "description": f"Expert services by {state.get('business_name')}. Serving {state.get('target_location')}. Contact us today!"},
-            {"page": "About Page", "title": f"About {state.get('business_name')} | Our Story", "description": f"Learn about {state.get('business_name')} and our commitment to excellence."},
-        ]
-
+        print(f"[content_agent] generate_metadata failed: {e}")
+        fallback = []
+        for label, page in target_pages:
+            h1 = page.get("h1") or label
+            fallback.append({
+                "page": label,
+                "url": page.get("url", ""),
+                "title": (h1[:40] + " | " + str(state.get("business_name", "")))[:60],
+                "description": (
+                    "Discover " + str(state.get("business_name", ""))
+                    + ((" — " + ", ".join(primary_kws[:2])) if primary_kws else "")
+                    + ". Based in " + str(state.get("target_location", "")) + "."
+                )[:155],
+            })
+        return fallback
 
 def generate_faqs(state: dict) -> list:
     business_analysis = state.get("business_analysis", {})

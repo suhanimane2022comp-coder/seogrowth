@@ -96,14 +96,14 @@ def run_report_agent(state: dict) -> dict:
 
     improvement_plan = get_improvement_plan(state)
 
-    # Derive total/critical issue counts directly from seo_issues instead of
-    # reading state["total_issues"] / state["critical_issues"], which nothing
-    # in the pipeline ever writes. This is the actual cause of the executive
-    # summary always reading "0 issues... 0 critical issues" even when
-    # seo_issues had real entries (proof: seo_scores already reflected them —
-    # Content Quality dropping to 30/100 was driven by these same issues).
-    total_issues = len(issues)
-    critical_issues_count = len([i for i in issues if i.get("severity") == "critical"])
+    # Count unique issue types (not per-page occurrences).
+    # e.g. "missing_canonical" on 11 pages = 1 unique issue, not 11.
+    unique_issue_types = set(i.get("issue_type", i.get("issue_key", "")) for i in issues)
+    total_issues = len(unique_issue_types)
+    critical_issues_count = len(
+        set(i.get("issue_type", i.get("issue_key", ""))
+            for i in issues if i.get("severity") == "critical")
+    )
 
     # Score grade
     overall = scores.get("overall_score", 0)

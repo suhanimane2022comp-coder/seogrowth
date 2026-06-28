@@ -265,6 +265,20 @@ async def _async_crawl_website(base_url: str, max_pages: int = 15) -> List[dict]
                     visited.add(norm)
 
                 page_data = extract_page_data(final_url, page_soup)
+
+                # Skip pages that are soft 404s (the server returned 200 but
+                # the page content is a "Not Found" / error page). These are
+                # common on SPAs and Shopify sites and pollute the report with
+                # fake issues and useless metadata suggestions.
+                page_title_lower = (page_data.get("title") or "").lower()
+                is_404_page = any(phrase in page_title_lower for phrase in [
+                    "not found", "404", "page not found", "error", "oops"
+                ])
+                if is_404_page:
+                    print(f"Skipping soft-404: {final_url} | title: {page_data.get('title')}")
+                    # Still mark as visited so we don't retry it
+                    continue
+
                 pages_data.append(page_data)
 
                 print(f"Crawled: {final_url} | words: {page_data['word_count']} | h1_count: {page_data['h1_count']}")
